@@ -97,21 +97,41 @@ This helps avoid mixing sampling depths when comparing historical soil results.
 
 ## mg/kg to kg/ha conversion
 
-The app includes a **Nutrient Mass Conversion** section for nutrients reported in mg/kg. You can choose the nutrient, specify soil bulk density in g/cm³, and specify the soil layer depth in cm. The depth defaults to the thickness of the currently selected sampling layer where possible.
+The app includes a **Nutrient Mass Conversion** section for nutrients reported in mg/kg. You choose the nutrient and specify soil bulk density in g/cm³. Soil layer thickness is calculated automatically for every individual test from the imported depth fields:
 
-The conversion used is:
+`layer thickness (cm) = depth_to - depth_from`
 
-`kg/ha = mg/kg × bulk density (g/cm³) × soil depth (cm) × 0.1`
+Each test is then converted separately using:
 
-The section displays:
+`kg/ha = mg/kg × bulk density (g/cm³) × layer thickness (cm) × 0.1`
+
+For example, a 0–10 cm result uses a 10 cm layer, while a 10–30 cm result uses a 20 cm layer. The app does not apply one global depth to all tests.
+
+The conversion section shows:
 
 - average concentration in mg/kg
 - specified bulk density
-- calculated soil mass in t/ha
-- estimated nutrient mass in kg/ha
-- paddock-by-paddock kg/ha estimates
-- sample-level converted values
+- mean sampled layer thickness
+- mean soil mass per hectare
+- mean nutrient mass in kg/ha
+- paddock-by-paddock mean/minimum/maximum kg/ha
+- sample-level `depth_from`, `depth_to`, calculated layer thickness and kg/ha
 
-For a mapped nutrient reported in mg/kg, the same bulk-density and depth settings are also included in the PDF report and paddock summary.
+Rows without valid `depth_from` and `depth_to` values, or where `depth_to <= depth_from`, are excluded from the kg/ha calculation rather than assigned an assumed depth.
 
-The kg/ha value is an estimated mass within the specified soil layer. It should not be interpreted automatically as plant-available nutrient or fertiliser requirement.
+For a mapped nutrient reported in mg/kg, the same row-level depth calculation is also used in the PDF report.
+
+The kg/ha value is an estimated mass within each sampled soil layer. It should not be interpreted automatically as plant-available nutrient or fertiliser requirement.
+
+## Total kg/ha profile map
+
+For nutrients reported in mg/kg, the interactive map now has a **Total kg/ha across sampled depths** mode.
+
+The calculation is performed in two stages:
+
+1. Every test layer is converted independently using `layer thickness = depth_to - depth_from` and `kg/ha = mg/kg × bulk density × layer thickness × 0.1`.
+2. Layers from the same sampling location on the same sampling day are summed to give a total sampled-profile nutrient mass in kg/ha.
+
+GPS latitude/longitude is preferred for identifying the same sampling location. If GPS is unavailable, Sample ID is used as the fallback profile identifier. Separate sample locations in the same paddock on the same date are therefore not intentionally combined.
+
+The map allows a sampling date to be selected and shows one point per sampled profile. Paddock polygons display the mean total profile kg/ha for the mapped profiles in that paddock. Profile-map colour classes are relative to the current mapped profile distribution; the exact kg/ha values are shown in map popups and the profile summary table.
