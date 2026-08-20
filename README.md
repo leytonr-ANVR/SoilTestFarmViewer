@@ -135,3 +135,7 @@ The calculation is performed in two stages:
 GPS latitude/longitude is preferred for identifying the same sampling location. If GPS is unavailable, Sample ID is used as the fallback profile identifier. Separate sample locations in the same paddock on the same date are therefore not intentionally combined.
 
 The map allows a sampling date to be selected and shows one point per sampled profile. Paddock polygons display the mean total profile kg/ha for the mapped profiles in that paddock. Profile-map colour classes are relative to the current mapped profile distribution; the exact kg/ha values are shown in map popups and the profile summary table.
+
+
+### Paddock trend comparison
+The Year-on-Year Analysis includes an **All paddocks** option. This plots every paddock as a separate line on the same trend graph for the selected nutrient and sampling depth, making paddock-to-paddock changes easy to compare. Missing years are left as gaps rather than interpolated.

@@ -989,8 +989,21 @@ else:
 
         paddock_options = sorted([str(p) for p in paddock_yoy["paddock"].dropna().unique()])
         if paddock_options:
-            selected_yoy_paddock = st.selectbox("Paddock trend", ["Whole farm"] + paddock_options)
-            if selected_yoy_paddock != "Whole farm":
+            selected_yoy_paddock = st.selectbox(
+                "Paddock trend",
+                ["Whole farm", "All paddocks"] + paddock_options,
+                help="Choose All paddocks to plot every paddock as a separate line across sampling years.",
+            )
+            if selected_yoy_paddock == "All paddocks":
+                all_paddock_trends = (
+                    paddock_yoy.assign(paddock=paddock_yoy["paddock"].astype(str))
+                    .pivot_table(index="year", columns="paddock", values="mean", aggfunc="mean")
+                    .sort_index()
+                )
+                if not all_paddock_trends.empty:
+                    st.line_chart(all_paddock_trends, use_container_width=True)
+                    st.caption("Each line represents one paddock. Gaps indicate years where that paddock has no matching result for the selected nutrient and depth.")
+            elif selected_yoy_paddock != "Whole farm":
                 pd_trend = paddock_yoy[paddock_yoy["paddock"].astype(str) == selected_yoy_paddock].set_index("year")[["mean"]].rename(columns={"mean": selected_yoy_paddock})
                 st.line_chart(pd_trend, use_container_width=True)
 
