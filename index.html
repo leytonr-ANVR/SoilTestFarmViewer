@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Interactive whole-farm soil nutrient mapping and analysis app." />
+  <title>Farm Soil Nutrient Mapper</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Farm Soil Nutrient Mapper</h1>
+      <p>Whole-farm soil test mapping, satellite overlays and nutrient analysis.</p>
+    </div>
+    <div class="actions">
+      <button id="loadDemoBtn" class="secondary">Load Demo Farm</button>
+      <button id="reportBtn">Print / Save PDF</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Import data</h2>
+        <label>Farm / Property name
+          <input id="farmName" type="text" value="Demo Farm" />
+        </label>
+        <label>Paddock boundaries
+          <input id="boundaryInput" type="file" accept=".zip,.geojson,.json,.kml" />
+          <small>Supports zipped ESRI Shapefile, GeoJSON and KML.</small>
+        </label>
+        <label>Soil test data
+          <input id="soilInput" type="file" accept=".xlsx,.xls,.csv" />
+          <small>Excel or CSV. Latitude/Longitude recommended for sample points.</small>
+        </label>
+        <div id="status" class="status">Demo data loaded.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Map controls</h2>
+        <label>Nutrient
+          <select id="nutrientSelect"></select>
+        </label>
+        <label>Year
+          <select id="yearSelect"><option value="all">All years</option></select>
+        </label>
+        <label>Depth
+          <select id="depthSelect"><option value="all">All depths</option></select>
+        </label>
+        <label>Map display
+          <select id="displaySelect">
+            <option value="both">Paddocks + samples</option>
+            <option value="paddocks">Paddock averages</option>
+            <option value="samples">Sample points</option>
+          </select>
+        </label>
+        <label class="check"><input id="satelliteToggle" type="checkbox" checked /> Satellite basemap</label>
+        <label>Overlay opacity
+          <input id="opacityRange" type="range" min="10" max="100" value="68" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Interpretation thresholds</h2>
+        <div class="threshold-grid">
+          <label>Low below<input id="lowThreshold" type="number" step="0.1" /></label>
+          <label>High above<input id="highThreshold" type="number" step="0.1" /></label>
+        </div>
+        <button id="applyThresholdBtn" class="secondary full">Apply thresholds</button>
+        <small>Adjust thresholds to suit crop, soil type, laboratory method and agronomic targets.</small>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="metrics" id="metrics"></div>
+
+      <section class="map-panel">
+        <div class="map-heading">
+          <div>
+            <h2 id="mapTitle">Soil Nutrient Map</h2>
+            <p id="mapSubtitle">Click a paddock or sample for details.</p>
+          </div>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div id="map"></div>
+      </section>
+
+      <section class="detail-grid">
+        <article class="panel">
+          <h2>Selected area</h2>
+          <div id="selectionDetails" class="selection-details">Select a paddock or sample.</div>
+        </article>
+        <article class="panel">
+          <h2>Farm nutrient summary</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Paddock</th><th>Samples</th><th>Average</th><th>Range</th><th>Status</th></tr></thead>
+              <tbody id="summaryBody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </section>
+  </main>
+
+
+  <div id="excelWizard" class="wizard hidden" role="dialog" aria-modal="true" aria-labelledby="wizardTitle">
+    <div class="wizard-card">
+      <div class="wizard-head">
+        <div>
+          <h2 id="wizardTitle">Excel Soil Test Import Wizard</h2>
+          <p id="wizardFileInfo">Review how spreadsheet columns will be imported.</p>
+        </div>
+        <button id="wizardCloseBtn" class="secondary" type="button">Close</button>
+      </div>
+      <div class="wizard-body">
+        <section class="wizard-section">
+          <h3>1. Sheet & structure</h3>
+          <div class="wizard-grid">
+            <label>Worksheet<select id="wizardSheet"></select></label>
+            <label>Header row<input id="wizardHeaderRow" type="number" min="1" value="1" /></label>
+            <label>Units row<input id="wizardUnitsRow" type="number" min="0" value="2" /><span class="field-help">Use 0 if the spreadsheet has no separate units row.</span></label>
+            <label>First data row<input id="wizardDataRow" type="number" min="1" value="3" /></label>
+            <label class="check"><input id="wizardTreat248" type="checkbox" checked /> Treat 248 as “no result”</label>
+            <label class="check"><input id="wizardParseLessThan" type="checkbox" checked /> Import &lt; / &gt; results as numeric limits</label>
+          </div>
+          <div id="wizardDetection" class="wizard-note" style="margin-top:12px"></div>
+        </section>
+
+        <section class="wizard-section">
+          <h3>2. Sample information</h3>
+          <div id="wizardMetaMappings" class="wizard-grid"></div>
+        </section>
+
+        <section class="wizard-section">
+          <h3>3. Nutrient mappings</h3>
+          <p class="wizard-note">Defaults are tuned to the supplied soil laboratory export. You can change any mapping before importing.</p>
+          <div id="wizardNutrientMappings" class="wizard-grid" style="margin-top:12px"></div>
+        </section>
+
+        <section class="wizard-section">
+          <h3>4. Data preview</h3>
+          <div id="wizardPreview" class="wizard-table-wrap"></div>
+        </section>
+      </div>
+      <div class="wizard-actions">
+        <button id="wizardCancelBtn" class="secondary" type="button">Cancel</button>
+        <button id="wizardImportBtn" type="button">Import Soil Data</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/shpjs@6.1.0/dist/shp.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@5.8.1/dist/togeojson.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
