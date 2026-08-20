@@ -1,3 +1,4 @@
-.DS_Store
-Thumbs.db
-*.log
+.venv/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml

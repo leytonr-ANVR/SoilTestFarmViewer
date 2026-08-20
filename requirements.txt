@@ -1,0 +1,9 @@
+streamlit>=1.40,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+openpyxl>=3.1,<4
+folium>=0.17,<1
+streamlit-folium>=0.23,<1
+shapely>=2.0,<3
+geopandas>=1.0,<2
+pyogrio>=0.10,<1
