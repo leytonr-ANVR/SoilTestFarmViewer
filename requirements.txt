@@ -7,3 +7,5 @@ streamlit-folium>=0.23,<1
 shapely>=2.0,<3
 geopandas>=1.0,<2
 pyogrio>=0.10,<1
+matplotlib>=3.9,<4
+reportlab>=4.2,<5

@@ -8,6 +8,14 @@ import folium
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon as MplPolygon, Patch
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 from folium.features import GeoJson, GeoJsonTooltip
 from shapely.geometry import shape, mapping, Point
 from streamlit_folium import st_folium
@@ -35,6 +43,11 @@ NUTRIENTS = {
     "Organic Carbon (W&B)": {"field": "oc", "unit": "%", "low": 1.0, "high": 2.0, "aliases": ["Organic Carbon (W&B)", "Organic Carbon"]},
     "CEC": {"field": "cec", "unit": "cmol(+)/kg", "low": 8, "high": 18, "aliases": ["Cation Exch. Cap.", "CEC"]},
     "Zinc (DTPA)": {"field": "zn", "unit": "mg/kg", "low": 0.8, "high": 2.0, "aliases": ["Zinc (DTPA)", "DTPA Zinc"]},
+    "Nitrate Nitrogen": {"field": "nitrate", "unit": "mg/kg", "low": 10.0, "high": 30.0, "aliases": ["Nitrate Nitrogen", "Nitrate Nitrogen (NO3)"]},
+    "ESP": {"field": "esp", "unit": "%", "low": 3.0, "high": 6.0, "aliases": ["Sodium % of Cations (ESP)", "ESP", "Exchangeable Sodium Percentage"]},
+    "Chloride": {"field": "chloride", "unit": "mg/kg", "low": 50.0, "high": 150.0, "aliases": ["Chloride"]},
+    "EC (1:5 water)": {"field": "ec", "unit": "dS/m", "low": 0.2, "high": 0.8, "aliases": ["Electrical Conductivity (1:5 water)", "Electrical Conductivity (1:5)", "EC (1:5)"]},
+    "ECse (Saturated Extract)": {"field": "ecse", "unit": "dS/m", "low": 2.0, "high": 4.0, "aliases": ["Elec. Cond. (Sat. Ext.)", "Elect. Conductivity on Sat. Extract", "Electrical Conductivity (Sat. Ext.)", "ECse"]},
 }
 
 STATUS_COLORS = {
@@ -167,11 +180,328 @@ def feature_name(feature):
             return str(props[key])
     return "Unnamed paddock"
 
+
+def pdf_safe_text(value):
+    text = str(value)
+    replacements = {
+        "₂": "2", "₃": "3", "₄": "4", "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9", "₀": "0",
+        "–": "-", "—": "-", "−": "-", "≤": "<=", "≥": ">=", "µ": "u", "°": " deg ",
+    }
+    for a, b in replacements.items():
+        text = text.replace(a, b)
+    return text
+
+
+def _iter_polygon_rings(geom):
+    """Yield exterior XY coordinates from Polygon/MultiPolygon geometry."""
+    if geom is None or geom.is_empty:
+        return
+    if geom.geom_type == "Polygon":
+        yield list(geom.exterior.coords)
+    elif geom.geom_type == "MultiPolygon":
+        for part in geom.geoms:
+            yield list(part.exterior.coords)
+
+
+def make_static_map_png(filtered, boundaries, field, nutrient_label, unit, low, high, show_samples=True, show_labels=True):
+    """Create a report-friendly static map image without requiring a browser screenshot."""
+    fig, ax = plt.subplots(figsize=(10.5, 6.2))
+    ax.set_facecolor("#f4f4f4")
+    plotted = False
+
+    paddock_stats = (
+        filtered.groupby("paddock", dropna=True)[field].agg(["mean", "count"]).reset_index()
+        if "paddock" in filtered.columns else pd.DataFrame()
+    )
+    stat_lookup = {str(r.paddock): r for _, r in paddock_stats.iterrows()}
+
+    if boundaries and boundaries.get("features"):
+        for feature in boundaries["features"]:
+            try:
+                geom = shape(feature.get("geometry"))
+            except Exception:
+                continue
+            name = feature_name(feature)
+            stats = stat_lookup.get(name)
+            value = float(stats["mean"]) if stats is not None and pd.notna(stats["mean"]) else np.nan
+            status = status_for(value, low, high)
+            for coords in _iter_polygon_rings(geom):
+                patch = MplPolygon(coords, closed=True, facecolor=STATUS_COLORS.get(status, "#999999"), edgecolor="white", linewidth=1.2, alpha=0.72)
+                ax.add_patch(patch)
+                plotted = True
+            if show_labels and not geom.is_empty:
+                c = geom.representative_point()
+                ax.text(c.x, c.y, name, fontsize=7.5, fontweight="bold", ha="center", va="center", color="black",
+                        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.65))
+
+    gps = filtered.dropna(subset=["latitude", "longitude"]) if {"latitude", "longitude"}.issubset(filtered.columns) else pd.DataFrame()
+    if show_samples and not gps.empty:
+        sample_colors = [STATUS_COLORS.get(status_for(v, low, high), "#999999") for v in gps[field]]
+        ax.scatter(gps["longitude"], gps["latitude"], c=sample_colors, edgecolors="black", linewidths=0.45, s=22, zorder=5)
+        plotted = True
+
+    if plotted:
+        ax.autoscale_view()
+        ax.margins(0.06)
+        ax.set_aspect("equal", adjustable="datalim")
+    else:
+        ax.text(0.5, 0.5, "No georeferenced paddock boundaries or GPS sample points available", ha="center", va="center", transform=ax.transAxes, fontsize=12)
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+
+    ax.set_title(f"{nutrient_label} nutrient map", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Longitude / map X")
+    ax.set_ylabel("Latitude / map Y")
+    legend_items = [Patch(facecolor=STATUS_COLORS[k], label=k) for k in ["Very low", "Low", "Adequate", "High", "Very high", "No data"]]
+    ax.legend(handles=legend_items, loc="lower center", bbox_to_anchor=(0.5, -0.18), ncol=6, frameon=False, fontsize=8)
+    ax.grid(alpha=0.15, linewidth=0.5)
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    bio = io.BytesIO()
+    fig.savefig(bio, format="png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    bio.seek(0)
+    return bio
+
+
+def build_yoy_tables(data, field):
+    """Return annual whole-farm and paddock year-on-year summaries for one nutrient."""
+    if data is None or data.empty or "sampling_date" not in data.columns or field not in data.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    work = data.copy()
+    work = work[work["sampling_date"].notna() & work[field].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    work["year"] = work["sampling_date"].dt.year.astype(int)
+    annual = work.groupby("year")[field].agg(["mean", "count", "min", "max"]).reset_index().sort_values("year")
+    if "paddock" in work.columns:
+        paddock = work.dropna(subset=["paddock"]).groupby(["year", "paddock"])[field].agg(["mean", "count"]).reset_index()
+    else:
+        paddock = pd.DataFrame()
+    return annual, paddock
+
+
+def comparison_table(paddock_yearly, older_year, newer_year):
+    if paddock_yearly is None or paddock_yearly.empty:
+        return pd.DataFrame()
+    old = paddock_yearly[paddock_yearly["year"] == older_year][["paddock", "mean", "count"]].rename(columns={"mean":"Older", "count":"Older samples"})
+    new = paddock_yearly[paddock_yearly["year"] == newer_year][["paddock", "mean", "count"]].rename(columns={"mean":"Newer", "count":"Newer samples"})
+    out = old.merge(new, on="paddock", how="outer")
+    out["Change"] = out["Newer"] - out["Older"]
+    out["Change %"] = np.where(out["Older"].notna() & (out["Older"] != 0), out["Change"] / out["Older"] * 100, np.nan)
+    return out.sort_values("Change", na_position="last")
+
+
+def mgkg_to_kgha(value, bulk_density, depth_cm):
+    """Convert a soil concentration in mg/kg to kg/ha for a specified soil layer."""
+    if pd.isna(value):
+        return np.nan
+    return float(value) * float(bulk_density) * float(depth_cm) * 0.1
+
+
+def default_conversion_depth(depth_choice):
+    """Use the thickness of the selected sampling interval when available."""
+    if depth_choice and depth_choice != "All depths":
+        try:
+            a, b = depth_choice.replace(" cm", "").split("–")
+            thickness = float(b) - float(a)
+            if thickness > 0:
+                return thickness
+        except Exception:
+            pass
+    return 10.0
+
+
+MGKG_NUTRIENTS = {label: meta for label, meta in NUTRIENTS.items() if meta.get("unit") == "mg/kg"}
+
+
+def generate_pdf_report(filtered, boundaries, nutrient_label, meta, field, low, high, year_choice, depth_choice, show_samples, show_labels, report_title, include_sample_rows=True, yoy_source=None, bulk_density=None, conversion_depth_cm=None):
+    """Generate a landscape A4 PDF containing the map and current filtered data."""
+    buf = io.BytesIO()
+    report_title_pdf = pdf_safe_text(report_title)
+    nutrient_label_pdf = pdf_safe_text(nutrient_label)
+    year_pdf = pdf_safe_text(year_choice)
+    depth_pdf = pdf_safe_text(depth_choice)
+    unit_pdf = pdf_safe_text(meta["unit"])
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4), rightMargin=12*mm, leftMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm,
+        title=report_title_pdf, author="Farm Soil Nutrient Mapper"
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("ReportTitle", parent=styles["Title"], fontSize=19, leading=22, spaceAfter=5, alignment=TA_CENTER)
+    small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=8, leading=10)
+    heading = ParagraphStyle("Heading", parent=styles["Heading2"], fontSize=12, leading=14, spaceBefore=5, spaceAfter=5)
+    story = [Paragraph(report_title_pdf, title_style)]
+    story.append(Paragraph(
+        f"Nutrient: <b>{nutrient_label_pdf}</b> &nbsp;&nbsp; | &nbsp;&nbsp; Year: <b>{year_pdf}</b> &nbsp;&nbsp; | &nbsp;&nbsp; Depth: <b>{depth_pdf}</b> &nbsp;&nbsp; | &nbsp;&nbsp; Thresholds: Low &lt; {low:g}, High &gt; {high:g} {unit_pdf}",
+        small
+    ))
+    story.append(Spacer(1, 5*mm))
+
+    valid = filtered[field].dropna()
+    avg = valid.mean() if len(valid) else np.nan
+    low_samples = int((valid < low).sum()) if len(valid) else 0
+    gps_count = int(filtered[["latitude", "longitude"]].dropna().shape[0]) if {"latitude", "longitude"}.issubset(filtered.columns) else 0
+    metrics = [
+        ["Samples", "Average", "Low samples", "Paddocks", "GPS samples"],
+        [f"{len(filtered):,}", "-" if pd.isna(avg) else f"{avg:.2f} {unit_pdf}", str(low_samples), str(filtered["paddock"].dropna().nunique()), str(gps_count)]
+    ]
+    mt = Table(metrics, colWidths=[48*mm]*5, rowHeights=[7*mm, 9*mm])
+    mt.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#E9F3EC")),
+        ("TEXTCOLOR", (0,0), (-1,-1), colors.HexColor("#1D3325")),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTNAME", (0,1), (-1,1), "Helvetica-Bold"),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#B7CDBE")),
+        ("INNERGRID", (0,0), (-1,-1), 0.25, colors.HexColor("#D5E2D8")),
+    ]))
+    story.append(mt)
+    story.append(Spacer(1, 5*mm))
+
+    conversion_active = meta.get("unit") == "mg/kg" and bulk_density is not None and conversion_depth_cm is not None
+    if conversion_active and len(valid):
+        avg_kgha = mgkg_to_kgha(avg, bulk_density, conversion_depth_cm)
+        story.append(Paragraph(
+            f"Mass conversion: <b>{avg_kgha:.1f} kg/ha</b> average for {nutrient_label_pdf}, using bulk density <b>{bulk_density:.2f} g/cm3</b> and soil depth <b>{conversion_depth_cm:.1f} cm</b>. Formula: kg/ha = mg/kg x bulk density x depth x 0.1.",
+            small
+        ))
+        story.append(Spacer(1, 3*mm))
+
+    map_png = make_static_map_png(filtered, boundaries, field, nutrient_label, meta["unit"], low, high, show_samples, show_labels)
+    story.append(Image(map_png, width=245*mm, height=133*mm))
+    story.append(Paragraph("Map colours use the current editable thresholds. The PDF map is a report rendering of the paddock polygons and GPS sample points; the interactive satellite basemap remains available in the Streamlit map.", small))
+
+    paddock_stats = filtered.groupby("paddock", dropna=True)[field].agg(["mean", "count", "min", "max"]).reset_index() if "paddock" in filtered.columns else pd.DataFrame()
+    story.append(PageBreak())
+    story.append(Paragraph("Paddock Nutrient Summary", heading))
+    if paddock_stats.empty:
+        story.append(Paragraph("No paddock names were available for the current filter.", small))
+    else:
+        if conversion_active:
+            rows = [["Paddock", "Samples", f"Average ({unit_pdf})", "Average (kg/ha)", "Minimum", "Maximum", "Status"]]
+            for _, r in paddock_stats.sort_values("mean").iterrows():
+                rows.append([str(r["paddock"]), int(r["count"]), f"{r['mean']:.3g}", f"{mgkg_to_kgha(r['mean'], bulk_density, conversion_depth_cm):.1f}", f"{r['min']:.3g}", f"{r['max']:.3g}", status_for(r["mean"], low, high)])
+            paddock_widths = [48*mm, 22*mm, 31*mm, 34*mm, 27*mm, 27*mm, 31*mm]
+        else:
+            rows = [["Paddock", "Samples", f"Average ({unit_pdf})" if unit_pdf else "Average", "Minimum", "Maximum", "Status"]]
+            for _, r in paddock_stats.sort_values("mean").iterrows():
+                rows.append([str(r["paddock"]), int(r["count"]), f"{r['mean']:.3g}", f"{r['min']:.3g}", f"{r['max']:.3g}", status_for(r["mean"], low, high)])
+            paddock_widths = [55*mm, 25*mm, 35*mm, 30*mm, 30*mm, 35*mm]
+        pt = Table(rows, repeatRows=1, colWidths=paddock_widths)
+        pt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#2E6B45")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F6F8F6")]),
+            ("ALIGN", (1,1), (-2,-1), "RIGHT"),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING", (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        story.append(pt)
+
+    annual_yoy, paddock_yoy = build_yoy_tables(yoy_source, field)
+    if not annual_yoy.empty and len(annual_yoy) >= 2:
+        story.append(Spacer(1, 5*mm))
+        story.append(Paragraph("Year-on-Year Analysis", heading))
+        yoy_rows = [["Year", "Samples", f"Average ({unit_pdf})" if unit_pdf else "Average", "Minimum", "Maximum", "Change vs prior", "Change %"]]
+        prior_mean = None
+        for _, r in annual_yoy.iterrows():
+            change = np.nan if prior_mean is None else r["mean"] - prior_mean
+            pct = np.nan if prior_mean in (None, 0) or pd.isna(prior_mean) else change / prior_mean * 100
+            yoy_rows.append([
+                int(r["year"]), int(r["count"]), f"{r['mean']:.3g}", f"{r['min']:.3g}", f"{r['max']:.3g}",
+                "-" if pd.isna(change) else f"{change:+.3g}", "-" if pd.isna(pct) else f"{pct:+.1f}%"
+            ])
+            prior_mean = r["mean"]
+        yt = Table(yoy_rows, repeatRows=1, colWidths=[24*mm, 25*mm, 34*mm, 28*mm, 28*mm, 34*mm, 30*mm])
+        yt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#2E6B45")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F6F8F6")]),
+            ("ALIGN", (1,1), (-1,-1), "RIGHT"),
+        ]))
+        story.append(yt)
+
+        years_available = annual_yoy["year"].astype(int).tolist()
+        older_year, newer_year = years_available[-2], years_available[-1]
+        comp = comparison_table(paddock_yoy, older_year, newer_year)
+        if not comp.empty:
+            story.append(Spacer(1, 4*mm))
+            story.append(Paragraph(f"Paddock change: {older_year} to {newer_year}", heading))
+            cr = [["Paddock", str(older_year), str(newer_year), "Change", "Change %", "Samples (old/new)"]]
+            for _, r in comp.iterrows():
+                cr.append([
+                    str(r["paddock"]),
+                    "-" if pd.isna(r["Older"]) else f"{r['Older']:.3g}",
+                    "-" if pd.isna(r["Newer"]) else f"{r['Newer']:.3g}",
+                    "-" if pd.isna(r["Change"]) else f"{r['Change']:+.3g}",
+                    "-" if pd.isna(r["Change %"]) else f"{r['Change %']:+.1f}%",
+                    f"{0 if pd.isna(r['Older samples']) else int(r['Older samples'])}/{0 if pd.isna(r['Newer samples']) else int(r['Newer samples'])}"
+                ])
+            ct = Table(cr, repeatRows=1, colWidths=[54*mm, 28*mm, 28*mm, 32*mm, 28*mm, 38*mm])
+            ct.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#E9F3EC")),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE", (0,0), (-1,-1), 7.5),
+                ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#D0D0D0")),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F6F8F6")]),
+                ("ALIGN", (1,1), (-1,-1), "RIGHT"),
+            ]))
+            story.append(ct)
+
+    if include_sample_rows:
+        story.append(Spacer(1, 5*mm))
+        story.append(Paragraph("Soil Sample Data", heading))
+        export_cols = [c for c in ["sample_id", "paddock", "sampling_date", "depth_from", "depth_to", field, "latitude", "longitude"] if c in filtered.columns]
+        sample = filtered[export_cols].copy()
+        if conversion_active and field in sample.columns:
+            sample["kg_ha"] = sample[field].map(lambda v: mgkg_to_kgha(v, bulk_density, conversion_depth_cm))
+            export_cols = export_cols + ["kg_ha"]
+        if "sampling_date" in sample.columns:
+            sample["sampling_date"] = sample["sampling_date"].dt.strftime("%d/%m/%Y").fillna("")
+        sample = sample.head(250)
+        headers = [
+            {"sample_id":"Sample ID", "paddock":"Paddock", "sampling_date":"Date", "depth_from":"Depth From", "depth_to":"Depth To", field:nutrient_label_pdf, "latitude":"Latitude", "longitude":"Longitude", "kg_ha":"kg/ha"}.get(c,c)
+            for c in export_cols
+        ]
+        rows = [headers] + [["" if pd.isna(v) else (f"{v:.4f}" if isinstance(v, (float, np.floating)) else str(v)) for v in row] for row in sample[export_cols].itertuples(index=False, name=None)]
+        widths = ([30*mm, 32*mm, 23*mm, 20*mm, 20*mm, 33*mm, 28*mm, 28*mm, 25*mm] if conversion_active else [32*mm, 35*mm, 25*mm, 22*mm, 22*mm, 38*mm, 30*mm, 30*mm])[:len(export_cols)]
+        dt = Table(rows, repeatRows=1, colWidths=widths)
+        dt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#E9F3EC")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 6.8),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#D0D0D0")),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ]))
+        story.append(dt)
+        if len(filtered) > 250:
+            story.append(Paragraph(f"PDF table limited to the first 250 filtered samples ({len(filtered):,} total). Use the CSV download for the complete filtered dataset.", small))
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawRightString(landscape(A4)[0]-12*mm, 7*mm, f"Page {doc.page}")
+        canvas.drawString(12*mm, 7*mm, "Farm Soil Nutrient Mapper")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    buf.seek(0)
+    return buf.getvalue()
+
 # ---------- State ----------
 for key, value in {
     "soil_df": None,
     "boundaries": None,
     "mapping_done": False,
+    "pdf_report": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = value
@@ -303,6 +633,12 @@ if depth_choice != "All depths":
     a, b = depth_choice.replace(" cm", "").split("–")
     filtered = filtered[(filtered["depth_from"] == float(a)) & (filtered["depth_to"] == float(b))]
 
+# Keep an all-years dataset at the same selected depth for historical comparisons.
+yoy_source = soil.copy()
+if depth_choice != "All depths":
+    a, b = depth_choice.replace(" cm", "").split("–")
+    yoy_source = yoy_source[(yoy_source["depth_from"] == float(a)) & (yoy_source["depth_to"] == float(b))]
+
 st.markdown("#### Interpretation thresholds")
 t1, t2 = st.columns(2)
 low = t1.number_input("Low below", value=float(meta["low"]), step=0.1)
@@ -400,6 +736,118 @@ else:
     out["Status"] = out["Average"].map(lambda v: status_for(v, low, high))
     out = out[["Paddock", "Samples", "Average", "Minimum", "Maximum", "Status"]].sort_values("Average")
     st.dataframe(out, use_container_width=True, hide_index=True)
+
+# ---------- mg/kg to kg/ha conversion ----------
+st.subheader("Nutrient Mass Conversion (mg/kg → kg/ha)")
+with st.container(border=True):
+    st.caption("Convert laboratory concentration into an estimated nutrient mass for a soil layer. Formula: kg/ha = mg/kg × bulk density (g/cm³) × soil depth (cm) × 0.1.")
+    mgkg_labels = list(MGKG_NUTRIENTS.keys())
+    default_conv_index = mgkg_labels.index(nutrient_label) if nutrient_label in mgkg_labels else 0
+    cv1, cv2, cv3 = st.columns([1.5, 1, 1])
+    conversion_nutrient = cv1.selectbox("Nutrient to convert", mgkg_labels, index=default_conv_index, key="conversion_nutrient")
+    bulk_density = cv2.number_input("Bulk density (g/cm³)", min_value=0.50, max_value=2.50, value=1.30, step=0.05, format="%.2f", key="bulk_density")
+    conversion_depth_cm = cv3.number_input("Soil depth (cm)", min_value=1.0, max_value=300.0, value=float(default_conversion_depth(depth_choice)), step=1.0, format="%.1f", key="conversion_depth_cm")
+
+    conv_meta = MGKG_NUTRIENTS[conversion_nutrient]
+    conv_field = conv_meta["field"]
+    conv_valid = filtered[conv_field].dropna() if conv_field in filtered.columns else pd.Series(dtype=float)
+    if conv_valid.empty:
+        st.info(f"No usable {conversion_nutrient} results are available for the current year/depth filter.")
+    else:
+        conv_avg_mgkg = conv_valid.mean()
+        conv_avg_kgha = mgkg_to_kgha(conv_avg_mgkg, bulk_density, conversion_depth_cm)
+        soil_mass_t_ha = bulk_density * conversion_depth_cm * 100.0
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Average concentration", f"{conv_avg_mgkg:.2f} mg/kg")
+        q2.metric("Bulk density", f"{bulk_density:.2f} g/cm³")
+        q3.metric("Soil mass", f"{soil_mass_t_ha:,.0f} t/ha")
+        q4.metric("Estimated nutrient mass", f"{conv_avg_kgha:,.1f} kg/ha")
+
+        conv_work = filtered[[c for c in ["sample_id", "paddock", "sampling_date", "depth_from", "depth_to", conv_field] if c in filtered.columns]].copy()
+        conv_work["kg/ha"] = conv_work[conv_field].map(lambda v: mgkg_to_kgha(v, bulk_density, conversion_depth_cm))
+        conv_paddock = conv_work.groupby("paddock", dropna=True)[conv_field].agg(["mean", "count", "min", "max"]).reset_index() if "paddock" in conv_work.columns else pd.DataFrame()
+        if not conv_paddock.empty:
+            conv_paddock["Estimated kg/ha"] = conv_paddock["mean"].map(lambda v: mgkg_to_kgha(v, bulk_density, conversion_depth_cm))
+            conv_paddock = conv_paddock.rename(columns={"paddock":"Paddock", "count":"Samples", "mean":"Average mg/kg", "min":"Minimum mg/kg", "max":"Maximum mg/kg"})
+            st.markdown("##### Paddock conversion summary")
+            st.dataframe(conv_paddock[["Paddock", "Samples", "Average mg/kg", "Estimated kg/ha", "Minimum mg/kg", "Maximum mg/kg"]].sort_values("Estimated kg/ha"), use_container_width=True, hide_index=True)
+        with st.expander("Sample-level converted values"):
+            sample_display = conv_work.rename(columns={conv_field: "mg/kg"}).copy()
+            st.dataframe(sample_display, use_container_width=True, hide_index=True)
+
+st.subheader("Year-on-Year Analysis")
+annual_yoy, paddock_yoy = build_yoy_tables(yoy_source, field)
+if annual_yoy.empty or len(annual_yoy) < 2:
+    st.info("At least two sampling years with results for this nutrient and depth are required for year-on-year analysis.")
+else:
+    chart_df = annual_yoy.set_index("year")[["mean"]].rename(columns={"mean": f"Average {nutrient_label}"})
+    st.line_chart(chart_df, use_container_width=True)
+
+    available_years = annual_yoy["year"].astype(int).tolist()
+    y1, y2 = st.columns(2)
+    older_year = y1.selectbox("Compare from", available_years[:-1], index=max(0, len(available_years)-2), key="yoy_older")
+    newer_candidates = [y for y in available_years if y > older_year]
+    newer_year = y2.selectbox("Compare to", newer_candidates, index=len(newer_candidates)-1, key="yoy_newer")
+
+    older_row = annual_yoy[annual_yoy["year"] == older_year].iloc[0]
+    newer_row = annual_yoy[annual_yoy["year"] == newer_year].iloc[0]
+    change = newer_row["mean"] - older_row["mean"]
+    pct_change = np.nan if older_row["mean"] == 0 else change / older_row["mean"] * 100
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(str(older_year), f"{older_row['mean']:.2f} {meta['unit']}".strip(), f"{int(older_row['count'])} samples")
+    c2.metric(str(newer_year), f"{newer_row['mean']:.2f} {meta['unit']}".strip(), f"{int(newer_row['count'])} samples")
+    c3.metric("Level change", f"{change:+.2f} {meta['unit']}".strip())
+    c4.metric("Percentage change", "—" if pd.isna(pct_change) else f"{pct_change:+.1f}%")
+
+    annual_display = annual_yoy.copy()
+    annual_display["Change"] = annual_display["mean"].diff()
+    annual_display["Change %"] = annual_display["mean"].pct_change() * 100
+    annual_display = annual_display.rename(columns={"year":"Year", "mean":"Average", "count":"Samples", "min":"Minimum", "max":"Maximum"})
+    st.markdown("##### Whole-farm annual levels")
+    st.dataframe(annual_display[["Year", "Samples", "Average", "Minimum", "Maximum", "Change", "Change %"]], use_container_width=True, hide_index=True)
+
+    comp = comparison_table(paddock_yoy, older_year, newer_year)
+    if not comp.empty:
+        comp_display = comp.rename(columns={"paddock":"Paddock", "Older":str(older_year), "Newer":str(newer_year)})
+        st.markdown("##### Paddock change")
+        st.dataframe(comp_display[["Paddock", "Older samples", "Newer samples", str(older_year), str(newer_year), "Change", "Change %"]], use_container_width=True, hide_index=True)
+
+        paddock_options = sorted([str(p) for p in paddock_yoy["paddock"].dropna().unique()])
+        if paddock_options:
+            selected_yoy_paddock = st.selectbox("Paddock trend", ["Whole farm"] + paddock_options)
+            if selected_yoy_paddock != "Whole farm":
+                pd_trend = paddock_yoy[paddock_yoy["paddock"].astype(str) == selected_yoy_paddock].set_index("year")[["mean"]].rename(columns={"mean": selected_yoy_paddock})
+                st.line_chart(pd_trend, use_container_width=True)
+
+st.subheader("Export Map & Data to PDF")
+with st.container(border=True):
+    r1, r2 = st.columns([2, 1])
+    report_title = r1.text_input("PDF report title", value="Farm Soil Nutrient Report")
+    include_sample_rows = r2.checkbox("Include sample data table", True, help="Includes up to 250 filtered samples in the PDF. The CSV export remains available for the complete dataset.")
+    st.caption("The PDF includes the current nutrient layer, filters, thresholds, map, farm metrics, paddock summary, year-on-year analysis, mg/kg → kg/ha conversion for mg/kg nutrients, and optional sample table.")
+    if st.button("Prepare PDF report", type="primary"):
+        try:
+            with st.spinner("Building PDF report..."):
+                st.session_state.pdf_report = generate_pdf_report(
+                    filtered=filtered, boundaries=boundaries, nutrient_label=nutrient_label, meta=meta, field=field,
+                    low=low, high=high, year_choice=year_choice, depth_choice=depth_choice, show_samples=show_samples,
+                    show_labels=show_labels, report_title=report_title.strip() or "Farm Soil Nutrient Report",
+                    include_sample_rows=include_sample_rows, yoy_source=yoy_source,
+                    bulk_density=bulk_density if meta.get("unit") == "mg/kg" else None,
+                    conversion_depth_cm=conversion_depth_cm if meta.get("unit") == "mg/kg" else None,
+                )
+            st.success("PDF report is ready to download.")
+        except Exception as e:
+            st.error(f"Could not build PDF report: {e}")
+    if st.session_state.pdf_report:
+        safe_nutrient = re.sub(r"[^A-Za-z0-9]+", "_", nutrient_label).strip("_").lower()
+        st.download_button(
+            "Download PDF report",
+            data=st.session_state.pdf_report,
+            file_name=f"farm_soil_{safe_nutrient}_report.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 st.subheader("Imported Soil Data")
 st.dataframe(filtered, use_container_width=True, hide_index=True)
